@@ -32,6 +32,7 @@ import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.Container;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.Transferable;
+import org.testcontainers.utility.DockerImageName;
 
 import com.ibm.websphere.simplicity.config.OpenidConnectClient;
 import com.ibm.websphere.simplicity.config.SSL;
@@ -53,7 +54,52 @@ import componenttest.topology.impl.LibertyServer;
 public class KeycloakContainer extends org.testcontainers.containers.GenericContainer<KeycloakContainer> {
 
     static final String TAG = "26.6.2";
-    private static final String IMAGE = "quay.io/keycloak/keycloak:" + TAG;
+    /**
+     * Pre-augmented image stored in IBM Container Registry. Built from
+     * {@code fat/resources/keycloak/Containerfile} - Quarkus augmentation is
+     * baked in at image build time, so the container starts in ~20 seconds
+     * instead of ~3-5 minutes.
+     *
+     * <p>External contributors who cannot reach ICR fall back automatically to
+     * the upstream Keycloak base image via {@link #resolveImage()}.
+     */
+    private static final String ICR_IMAGE = "icr.io/appcafe/open-liberty/dependencies/keycloak-mcp-fat:" + TAG;
+    private static final String BASE_IMAGE = "quay.io/keycloak/keycloak:" + TAG;
+
+    /**
+     * Whether the pre-augmented ICR image is reachable in this environment.
+     * Evaluated once at class-load time so the decision is made before any
+     * container is started.
+     */
+    static final boolean OPTIMIZED = isIcrAvailable();
+
+    private static boolean isIcrAvailable() {
+        try {
+            DockerClientFactory.instance().client()
+                               .inspectImageCmd(ICR_IMAGE)
+                               .exec();
+            // Image is already pulled locally; optimized path is available.
+            return true;
+        } catch (Exception localMiss) {
+            // Not cached locally; attempt a remote manifest check.
+        }
+        try {
+            DockerClientFactory.instance().client()
+                               .pullImageCmd(ICR_IMAGE)
+                               .start()
+                               .awaitCompletion(30, java.util.concurrent.TimeUnit.SECONDS);
+            return true;
+        } catch (Exception e) {
+            System.out.println("[KeycloakContainer] ICR image not reachable (" + e.getMessage()
+                               + "); falling back to base image with full augmentation on start.");
+            return false;
+        }
+    }
+
+    private static DockerImageName resolveImage() {
+        return DockerImageName.parse(OPTIMIZED ? ICR_IMAGE : BASE_IMAGE)
+                              .asCompatibleSubstituteFor("quay.io/keycloak/keycloak");
+    }
 
     static final String REALM = "mcp-realm";
     static final String LIBERTY_CLIENT_ID = "liberty-mcp-server-conf-client";
@@ -90,19 +136,29 @@ public class KeycloakContainer extends org.testcontainers.containers.GenericCont
     // Constructor
 
     public KeycloakContainer() {
-        super(IMAGE);
+        super(resolveImage());
         withExposedPorts(8080, 8443);
         withStartupAttempts(3);
         withCopyToContainer(buildKeycloakKeystore(), "/keystore.p12");
         withEnv("KEYCLOAK_ADMIN", "admin");
         withEnv("KEYCLOAK_ADMIN_PASSWORD", "admin");
+        // Note: --optimized is only accepted by `kc.sh start` (production mode).
+        // start-dev does not support that flag; both the pre-augmented ICR image
+        // and the base image use the same command.  The ICR image is still faster
+        // because the kc.sh build artefacts are already present in the image.
         withCommand("start-dev",
                     "--https-key-store-file=/keystore.p12",
                     "--https-key-store-password=password",
                     "--hostname-strict=false");
+
         withLogConsumer(new SimpleLogConsumer(KeycloakContainer.class, "keycloak-container"));
+        // The pre-augmented ICR image has kc.sh build artefacts baked in so
+        // start-dev completes faster; 90 seconds is ample.  The base image
+        // performs full augmentation on first boot; allow 5 minutes for busy
+        // or remote CI machines.
+        Duration startupTimeout = OPTIMIZED ? Duration.ofSeconds(90) : Duration.ofMinutes(5);
         waitingFor(Wait.forLogMessage(".*Listening on:.*", 1)
-                       .withStartupTimeout(Duration.ofMinutes(2)));
+                       .withStartupTimeout(startupTimeout));
     }
 
     // Public API
@@ -306,10 +362,10 @@ public class KeycloakContainer extends org.testcontainers.containers.GenericCont
                                       "grant_type=password");
 
         java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
-                                         .uri(URI.create(tokenEndpoint))
-                                         .header("Content-Type", "application/x-www-form-urlencoded")
-                                         .POST(java.net.http.HttpRequest.BodyPublishers.ofString(formData))
-                                         .build();
+                                                                     .uri(URI.create(tokenEndpoint))
+                                                                     .header("Content-Type", "application/x-www-form-urlencoded")
+                                                                     .POST(java.net.http.HttpRequest.BodyPublishers.ofString(formData))
+                                                                     .build();
 
         java.net.http.HttpResponse<String> response = getHttpClient().send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200) {
