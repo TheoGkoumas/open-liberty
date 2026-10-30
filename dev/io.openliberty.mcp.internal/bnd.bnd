@@ -71,8 +71,10 @@ Bundle-Localization: \
 	com.ibm.ws.cdi.interfaces.jakarta;version=latest,\
 	com.ibm.ws.transport.http;version=latest,\
 	com.ibm.ws.kernel.service;version=latest,\
+	com.ibm.ws.kernel.boot.core;version=latest,\
 	com.ibm.ws.container.service;version=latest,\
-	com.ibm.ws.app.manager;version=latest
+	com.ibm.ws.app.manager;version=latest,\
+	com.ibm.ws.kernel.boot
 
 -testpath: \
 	org.hamcrest:hamcrest-all;version=1.3,\
